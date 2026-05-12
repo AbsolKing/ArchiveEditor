@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Archive Editor
+GenericName=Archive Editor
+Comment=Add anime, game, and review entries to your personal archive
+Exec=archive-editor
+Icon=io.github.absolking.ArchiveEditor
+Terminal=false
+Type=Application
+Categories=Utility;Development;TextEditor;
+StartupNotify=true
+Keywords=archive;anime;games;reviews;

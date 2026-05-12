@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#2d2d30"/>
+      <stop offset="1" stop-color="#1a1a1a"/>
+    </linearGradient>
+    <linearGradient id="ak" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#569cd6"/>
+      <stop offset="1" stop-color="#4ec9b0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+  <rect x="1" y="1" width="126" height="126" rx="23" fill="none" stroke="#3e3e42" stroke-width="0.5" opacity="0.6"/>
+
+  <g opacity="0.22">
+    <rect x="22" y="32"  width="84" height="3" rx="1.5" fill="#569cd6"/>
+    <rect x="22" y="42"  width="68" height="3" rx="1.5" fill="#dcdcaa"/>
+    <rect x="22" y="52"  width="76" height="3" rx="1.5" fill="#4ec9b0"/>
+  </g>
+
+  <text x="64" y="100" font-family="monospace" font-size="34" font-weight="bold"
+        text-anchor="middle" fill="url(#ak)" letter-spacing="2">AK</text>
+</svg>

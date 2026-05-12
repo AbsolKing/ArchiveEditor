@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.absolking.ArchiveEditor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Archive Editor</name>
+  <summary>Add anime, games, and reviews to your personal archive</summary>
+  <description>
+    <p>
+      Archive Editor is a small GNOME app for adding anime and game entries —
+      with optional review pages — to the absolking-archive personal website
+      project.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Add anime or game entries with title, status, score, progress, and notes</li>
+      <li>Optionally write a review that becomes a routed page in App.jsx</li>
+      <li>Pick a cover image from anywhere and have it copied into the project</li>
+      <li>Validates duplicates and never partial-writes — checks pass before any edit</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.absolking.ArchiveEditor.desktop</launchable>
+  <developer id="io.github.absolking">
+    <name>AbsolKing</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Utility</category>
+    <category>Development</category>
+  </categories>
+  <releases>
+    <release version="1.0.0" date="2026-05-10">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
