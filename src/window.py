@@ -26,6 +26,7 @@ GAME_STATUSES = [
     ("Backlog",  "backlog"),
 ]
 ANIME_SUBTYPES = ["TV", "OVA", "Movie", "ONA", "Special"]
+BLOG_CATEGORIES = ["Notes", "Archive", "Design", "Roadmap"]
 
 
 # ============================================================
@@ -61,22 +62,25 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
         self._settings = _load_settings()
         self.project_path = self._settings.get("project_path")
 
-        # Per-tab state
-        self._create_image_source = None
-        self._create_image_filename = None
-        self._create_kind = "anime"
+        # Database tab state
+        self._db_kind = "anime"
+        self._db_create_image_source = None
+        self._db_create_image_filename = None
+        self._db_edit_entries_cache = []
+        self._db_edit_selected_entry = None
+        self._db_edit_had_review = False
 
-        self._edit_kind = "anime"
-        self._edit_entries_cache = []
-        self._edit_selected_entry = None  # dict from list_entries
-        self._edit_had_review = False
+        # Blog tab state
+        self._blog_posts_cache = []
+        self._blog_selected_slug = None
 
         self._build_ui()
 
         # Reflect persisted project folder on both tabs
         self._refresh_project_rows()
-        self._on_create_kind_changed()
-        self._on_edit_kind_changed()
+        self._on_db_kind_changed()
+        self._reload_db_edit_entries()
+        self._reload_blog_posts()
 
     # ============================================================
     # Top-level layout
@@ -88,18 +92,15 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
         toolbar_view = Adw.ToolbarView()
         self.toast_overlay.set_child(toolbar_view)
 
-        # View stack must exist before we wire it to the switcher
         self.view_stack = Adw.ViewStack()
 
         header = Adw.HeaderBar()
-        # ViewSwitcher in the header title
         switcher = Adw.ViewSwitcher()
         switcher.set_stack(self.view_stack)
         switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(switcher)
         toolbar_view.add_top_bar(header)
 
-        # Compact switcher bar shown when window is narrow
         switcher_bar = Adw.ViewSwitcherBar()
         switcher_bar.set_stack(self.view_stack)
         switcher_bar.set_reveal(True)
@@ -107,22 +108,19 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
 
         toolbar_view.set_content(self.view_stack)
 
-        # Add the two pages
-        create_page = self._build_create_view()
-        edit_page = self._build_edit_view()
+        db_page = self._build_database_view()
+        blog_page = self._build_blog_view()
         self.view_stack.add_titled_with_icon(
-            create_page, "create", "Create", "list-add-symbolic"
+            db_page, "database", "Database", "folder-symbolic"
         )
         self.view_stack.add_titled_with_icon(
-            edit_page, "edit", "Edit", "document-edit-symbolic"
+            blog_page, "blog", "Blog", "document-edit-symbolic"
         )
 
     # ============================================================
     # Shared widgets
     # ============================================================
     def _make_project_row(self):
-        """A project-folder row. Multiple instances exist (one per tab),
-        all reading/writing the same self.project_path state."""
         row = Adw.ActionRow(title="Folder", subtitle="No folder selected")
         btn = Gtk.Button(label="Choose…")
         btn.set_valign(Gtk.Align.CENTER)
@@ -133,270 +131,10 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
 
     def _refresh_project_rows(self):
         text = self.project_path or "No folder selected"
-        if hasattr(self, "project_row_create"):
-            self.project_row_create.set_subtitle(text)
-        if hasattr(self, "project_row_edit"):
-            self.project_row_edit.set_subtitle(text)
-
-    # ============================================================
-    # CREATE view
-    # ============================================================
-    def _build_create_view(self):
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_vexpand(True)
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(640)
-        clamp.set_tightening_threshold(580)
-        scrolled.set_child(clamp)
-
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
-        main.set_margin_top(24)
-        main.set_margin_bottom(24)
-        main.set_margin_start(12)
-        main.set_margin_end(12)
-        clamp.set_child(main)
-
-        # Project
-        proj_group = Adw.PreferencesGroup()
-        proj_group.set_title("Project")
-        proj_group.set_description("The website project folder")
-        main.append(proj_group)
-        self.project_row_create = self._make_project_row()
-        proj_group.add(self.project_row_create)
-
-        # Entry
-        entry_group = Adw.PreferencesGroup(title="New entry")
-        main.append(entry_group)
-
-        self.c_kind_row = Adw.ComboRow(title="Type")
-        self.c_kind_row.set_model(Gtk.StringList.new(["Anime", "Game"]))
-        self.c_kind_row.connect("notify::selected", self._on_create_kind_changed)
-        entry_group.add(self.c_kind_row)
-
-        self.c_title_row = Adw.EntryRow(title="Title")
-        entry_group.add(self.c_title_row)
-
-        self.c_subtype_combo_row = Adw.ComboRow(title="Subtype")
-        self.c_subtype_combo_row.set_model(Gtk.StringList.new(ANIME_SUBTYPES))
-        entry_group.add(self.c_subtype_combo_row)
-
-        self.c_subtype_entry_row = Adw.EntryRow(title="Subtype  (e.g. RPG, Roguelike)")
-        entry_group.add(self.c_subtype_entry_row)
-
-        self.c_status_row = Adw.ComboRow(title="Status")
-        self.c_status_row.set_model(Gtk.StringList.new([s[0] for s in ANIME_STATUSES]))
-        entry_group.add(self.c_status_row)
-
-        self.c_score_row = Adw.SpinRow.new_with_range(0, 10, 1)
-        self.c_score_row.set_title("Score")
-        self.c_score_row.set_subtitle("Out of 10")
-        self.c_score_row.set_value(8)
-        entry_group.add(self.c_score_row)
-
-        self.c_unrated_row = Adw.SwitchRow(
-            title="Unrated", subtitle="Don't include a score"
-        )
-        self.c_unrated_row.connect("notify::active", self._on_create_unrated_toggled)
-        entry_group.add(self.c_unrated_row)
-
-        self.c_progress_row = Adw.EntryRow(title="Progress  (e.g. 13 / 13)")
-        entry_group.add(self.c_progress_row)
-
-        self.c_image_row = Adw.ActionRow(title="Image", subtitle="No image selected")
-        img_btn = Gtk.Button(label="Browse…")
-        img_btn.set_valign(Gtk.Align.CENTER)
-        img_btn.connect("clicked", self._on_create_choose_image)
-        self.c_image_row.add_suffix(img_btn)
-        self.c_image_row.set_activatable_widget(img_btn)
-        entry_group.add(self.c_image_row)
-
-        self.c_note_row = Adw.EntryRow(title="Note  (clickable if a review is added)")
-        entry_group.add(self.c_note_row)
-
-        # Review section
-        rev_group = Adw.PreferencesGroup(title="Review")
-        rev_group.set_description(
-            "Optional — creates /reviews/<kind>/<slug> and registers it in App.jsx"
-        )
-        main.append(rev_group)
-
-        self.c_review_switch_row = Adw.SwitchRow(
-            title="Create review page",
-            subtitle="The note above becomes a clickable link",
-        )
-        self.c_review_switch_row.connect("notify::active", self._on_create_review_toggled)
-        rev_group.add(self.c_review_switch_row)
-
-        text_group = Adw.PreferencesGroup()
-        text_group.set_description("Each blank line in the text below starts a new paragraph")
-        main.append(text_group)
-
-        self.c_review_buffer, self.c_review_view = self._make_text_area(text_group, 220)
-        self.c_review_view.set_sensitive(False)
-
-        # Action buttons
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        btn_row.set_halign(Gtk.Align.END)
-        btn_row.set_margin_top(8)
-        main.append(btn_row)
-
-        clear = Gtk.Button(label="Clear")
-        clear.connect("clicked", self._on_create_clear)
-        btn_row.append(clear)
-
-        add = Gtk.Button(label="Add Entry")
-        add.add_css_class("suggested-action")
-        add.connect("clicked", self._on_add_clicked)
-        btn_row.append(add)
-
-        return scrolled
-
-    # ============================================================
-    # EDIT view
-    # ============================================================
-    def _build_edit_view(self):
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_vexpand(True)
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(640)
-        clamp.set_tightening_threshold(580)
-        scrolled.set_child(clamp)
-
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
-        main.set_margin_top(24)
-        main.set_margin_bottom(24)
-        main.set_margin_start(12)
-        main.set_margin_end(12)
-        clamp.set_child(main)
-
-        # Project
-        proj_group = Adw.PreferencesGroup()
-        proj_group.set_title("Project")
-        proj_group.set_description("The website project folder")
-        main.append(proj_group)
-        self.project_row_edit = self._make_project_row()
-        proj_group.add(self.project_row_edit)
-
-        # Search section
-        search_group = Adw.PreferencesGroup(title="Find entry")
-        main.append(search_group)
-
-        self.e_kind_row = Adw.ComboRow(title="Type")
-        self.e_kind_row.set_model(Gtk.StringList.new(["Anime", "Game"]))
-        self.e_kind_row.connect("notify::selected", self._on_edit_kind_changed)
-        search_group.add(self.e_kind_row)
-
-        # SearchEntry sits inside its own row-like container so it lines up
-        self.e_search_entry = Gtk.SearchEntry()
-        self.e_search_entry.set_placeholder_text("Search by title…")
-        self.e_search_entry.connect("search-changed", self._on_edit_search_changed)
-
-        search_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        search_wrap.set_margin_top(8)
-        search_wrap.append(self.e_search_entry)
-
-        # Results listbox in a card
-        self.e_results_listbox = Gtk.ListBox()
-        self.e_results_listbox.add_css_class("boxed-list")
-        self.e_results_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.e_results_listbox.connect("row-activated", self._on_edit_result_activated)
-
-        self.e_results_scroll = Gtk.ScrolledWindow()
-        self.e_results_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.e_results_scroll.set_min_content_height(180)
-        self.e_results_scroll.set_max_content_height(280)
-        self.e_results_scroll.set_propagate_natural_height(True)
-        self.e_results_scroll.set_child(self.e_results_listbox)
-        search_wrap.append(self.e_results_scroll)
-
-        main.append(search_wrap)
-
-        # ── Selected-entry section (hidden until something is loaded) ──
-        self.e_form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
-        self.e_form_box.set_visible(False)
-        main.append(self.e_form_box)
-
-        info_group = Adw.PreferencesGroup(title="Editing")
-        self.e_form_box.append(info_group)
-
-        self.e_title_row = Adw.ActionRow(title="Title")
-        self.e_title_row.set_subtitle("")
-        self.e_form_box_title_row = self.e_title_row
-        info_group.add(self.e_title_row)
-
-        self.e_image_row = Adw.ActionRow(title="Image")
-        self.e_image_row.set_subtitle("")
-        info_group.add(self.e_image_row)
-
-        fields_group = Adw.PreferencesGroup(title="Fields")
-        self.e_form_box.append(fields_group)
-
-        self.e_subtype_combo_row = Adw.ComboRow(title="Subtype")
-        self.e_subtype_combo_row.set_model(Gtk.StringList.new(ANIME_SUBTYPES))
-        fields_group.add(self.e_subtype_combo_row)
-
-        self.e_subtype_entry_row = Adw.EntryRow(title="Subtype  (e.g. RPG, Roguelike)")
-        fields_group.add(self.e_subtype_entry_row)
-
-        self.e_status_row = Adw.ComboRow(title="Status")
-        self.e_status_row.set_model(Gtk.StringList.new([s[0] for s in ANIME_STATUSES]))
-        fields_group.add(self.e_status_row)
-
-        self.e_score_row = Adw.SpinRow.new_with_range(0, 10, 1)
-        self.e_score_row.set_title("Score")
-        self.e_score_row.set_subtitle("Out of 10")
-        self.e_score_row.set_value(8)
-        fields_group.add(self.e_score_row)
-
-        self.e_unrated_row = Adw.SwitchRow(
-            title="Unrated", subtitle="Don't include a score"
-        )
-        self.e_unrated_row.connect("notify::active", self._on_edit_unrated_toggled)
-        fields_group.add(self.e_unrated_row)
-
-        self.e_progress_row = Adw.EntryRow(title="Progress  (e.g. 13 / 13)")
-        fields_group.add(self.e_progress_row)
-
-        self.e_note_row = Adw.EntryRow(title="Note")
-        fields_group.add(self.e_note_row)
-
-        # Review
-        rev_group = Adw.PreferencesGroup(title="Review")
-        rev_group.set_description(
-            "Toggling off removes /reviews/<kind>/<slug> and unregisters it from App.jsx"
-        )
-        self.e_form_box.append(rev_group)
-
-        self.e_review_switch_row = Adw.SwitchRow(
-            title="Has review page",
-            subtitle="Note becomes a clickable link to the review",
-        )
-        self.e_review_switch_row.connect("notify::active", self._on_edit_review_toggled)
-        rev_group.add(self.e_review_switch_row)
-
-        text_group = Adw.PreferencesGroup()
-        text_group.set_description("Each blank line starts a new paragraph")
-        self.e_form_box.append(text_group)
-
-        self.e_review_buffer, self.e_review_view = self._make_text_area(text_group, 220)
-        self.e_review_view.set_sensitive(False)
-
-        # Save button
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        btn_row.set_halign(Gtk.Align.END)
-        btn_row.set_margin_top(8)
-        self.e_form_box.append(btn_row)
-
-        save = Gtk.Button(label="Save Changes")
-        save.add_css_class("suggested-action")
-        save.connect("clicked", self._on_save_clicked)
-        btn_row.append(save)
-
-        return scrolled
+        if hasattr(self, "project_row_db"):
+            self.project_row_db.set_subtitle(text)
+        if hasattr(self, "project_row_blog"):
+            self.project_row_blog.set_subtitle(text)
 
     def _make_text_area(self, parent_group, min_height):
         frame = Gtk.Frame()
@@ -438,8 +176,8 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
             self._refresh_project_rows()
             self._settings["project_path"] = self.project_path
             _save_settings(self._settings)
-            # Refresh the edit-tab entries cache if user is on edit view
-            self._reload_edit_entries()
+            self._reload_db_edit_entries()
+            self._reload_blog_posts()
 
     def _toast(self, message: str, error: bool = False):
         toast = Adw.Toast.new(message)
@@ -447,34 +185,229 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(toast)
 
     # ============================================================
-    # CREATE handlers
+    # DATABASE view
     # ============================================================
-    def _on_create_kind_changed(self, *_):
-        idx = self.c_kind_row.get_selected()
-        self._create_kind = "anime" if idx == 0 else "games"
-        if self._create_kind == "anime":
+    def _build_database_view(self):
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(640)
+        clamp.set_tightening_threshold(580)
+        scrolled.set_child(clamp)
+
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        main.set_margin_top(24)
+        main.set_margin_bottom(24)
+        main.set_margin_start(12)
+        main.set_margin_end(12)
+        clamp.set_child(main)
+
+        # Project
+        proj_group = Adw.PreferencesGroup()
+        proj_group.set_title("Project")
+        proj_group.set_description("The website project folder")
+        main.append(proj_group)
+        self.project_row_db = self._make_project_row()
+        proj_group.add(self.project_row_db)
+
+        # Mode selector
+        mode_group = Adw.PreferencesGroup(title="Mode")
+        main.append(mode_group)
+
+        self.db_mode_row = Adw.ComboRow(title="Action")
+        self.db_mode_row.set_model(Gtk.StringList.new(["Create new entry", "Edit existing entry"]))
+        self.db_mode_row.connect("notify::selected", self._on_db_mode_changed)
+        mode_group.add(self.db_mode_row)
+
+        # Edit-mode search (hidden in Create mode)
+        self.db_search_group = Adw.PreferencesGroup(title="Find entry")
+        main.append(self.db_search_group)
+
+        self.db_edit_kind_row = Adw.ComboRow(title="Type")
+        self.db_edit_kind_row.set_model(Gtk.StringList.new(["Anime", "Game"]))
+        self.db_edit_kind_row.connect("notify::selected", self._on_db_edit_kind_changed)
+        self.db_search_group.add(self.db_edit_kind_row)
+
+        self.db_search_entry = Gtk.SearchEntry()
+        self.db_search_entry.set_placeholder_text("Search by title…")
+        self.db_search_entry.connect("search-changed", self._on_db_search_changed)
+
+        search_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        search_wrap.set_margin_top(8)
+        search_wrap.append(self.db_search_entry)
+
+        self.db_results_listbox = Gtk.ListBox()
+        self.db_results_listbox.add_css_class("boxed-list")
+        self.db_results_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.db_results_listbox.connect("row-activated", self._on_db_result_activated)
+
+        results_scroll = Gtk.ScrolledWindow()
+        results_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        results_scroll.set_min_content_height(180)
+        results_scroll.set_max_content_height(280)
+        results_scroll.set_propagate_natural_height(True)
+        results_scroll.set_child(self.db_results_listbox)
+        search_wrap.append(results_scroll)
+        self.db_search_group.add(search_wrap)
+        self.db_search_group.set_visible(False)
+
+        # Edit-mode locked info (hidden until an entry is selected)
+        self.db_edit_info_group = Adw.PreferencesGroup(title="Editing")
+        self.db_edit_info_group.set_visible(False)
+        main.append(self.db_edit_info_group)
+
+        self.db_edit_title_row = Adw.ActionRow(title="Title")
+        self.db_edit_title_row.set_subtitle("")
+        self.db_edit_info_group.add(self.db_edit_title_row)
+
+        self.db_edit_image_row = Adw.ActionRow(title="Image")
+        self.db_edit_image_row.set_subtitle("")
+        self.db_edit_info_group.add(self.db_edit_image_row)
+
+        # Create-mode fields (hidden in Edit mode)
+        self.db_create_group = Adw.PreferencesGroup(title="New entry")
+        main.append(self.db_create_group)
+
+        self.db_create_kind_row = Adw.ComboRow(title="Type")
+        self.db_create_kind_row.set_model(Gtk.StringList.new(["Anime", "Game"]))
+        self.db_create_kind_row.connect("notify::selected", self._on_db_kind_changed)
+        self.db_create_group.add(self.db_create_kind_row)
+
+        self.db_create_title_row = Adw.EntryRow(title="Title")
+        self.db_create_group.add(self.db_create_title_row)
+
+        self.db_create_image_row = Adw.ActionRow(title="Image", subtitle="No image selected")
+        img_btn = Gtk.Button(label="Browse…")
+        img_btn.set_valign(Gtk.Align.CENTER)
+        img_btn.connect("clicked", self._on_db_create_choose_image)
+        self.db_create_image_row.add_suffix(img_btn)
+        self.db_create_image_row.set_activatable_widget(img_btn)
+        self.db_create_group.add(self.db_create_image_row)
+
+        # Shared editable fields (visible in both modes)
+        self.db_fields_group = Adw.PreferencesGroup(title="Fields")
+        main.append(self.db_fields_group)
+
+        self.db_subtype_combo_row = Adw.ComboRow(title="Subtype")
+        self.db_subtype_combo_row.set_model(Gtk.StringList.new(ANIME_SUBTYPES))
+        self.db_fields_group.add(self.db_subtype_combo_row)
+
+        self.db_subtype_entry_row = Adw.EntryRow(title="Subtype  (e.g. RPG, Roguelike)")
+        self.db_fields_group.add(self.db_subtype_entry_row)
+
+        self.db_status_row = Adw.ComboRow(title="Status")
+        self.db_status_row.set_model(Gtk.StringList.new([s[0] for s in ANIME_STATUSES]))
+        self.db_fields_group.add(self.db_status_row)
+
+        self.db_score_row = Adw.SpinRow.new_with_range(0, 10, 1)
+        self.db_score_row.set_title("Score")
+        self.db_score_row.set_subtitle("Out of 10")
+        self.db_score_row.set_value(8)
+        self.db_fields_group.add(self.db_score_row)
+
+        self.db_unrated_row = Adw.SwitchRow(
+            title="Unrated", subtitle="Don't include a score"
+        )
+        self.db_unrated_row.connect("notify::active", self._on_db_unrated_toggled)
+        self.db_fields_group.add(self.db_unrated_row)
+
+        self.db_progress_row = Adw.EntryRow(title="Progress  (e.g. 13 / 13)")
+        self.db_fields_group.add(self.db_progress_row)
+
+        self.db_note_row = Adw.EntryRow(title="Note  (clickable if a review is added)")
+        self.db_fields_group.add(self.db_note_row)
+
+        # Review section
+        self.db_review_group = Adw.PreferencesGroup(title="Review")
+        self.db_review_group.set_description(
+            "Optional — creates /reviews/<kind>/<slug> and registers it in App.jsx"
+        )
+        main.append(self.db_review_group)
+
+        self.db_review_switch_row = Adw.SwitchRow(
+            title="Review page",
+            subtitle="The note above becomes a clickable link",
+        )
+        self.db_review_switch_row.connect("notify::active", self._on_db_review_toggled)
+        self.db_review_group.add(self.db_review_switch_row)
+
+        review_text_group = Adw.PreferencesGroup()
+        review_text_group.set_description("Each blank line starts a new paragraph")
+        main.append(review_text_group)
+
+        self.db_review_buffer, self.db_review_view = self._make_text_area(review_text_group, 220)
+        self.db_review_view.set_sensitive(False)
+
+        # Action buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(8)
+        main.append(btn_row)
+
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.connect("clicked", self._on_db_clear)
+        btn_row.append(clear_btn)
+
+        self.db_save_btn = Gtk.Button(label="Add Entry")
+        self.db_save_btn.add_css_class("suggested-action")
+        self.db_save_btn.connect("clicked", self._on_db_save_clicked)
+        btn_row.append(self.db_save_btn)
+
+        return scrolled
+
+    # ============================================================
+    # DATABASE handlers
+    # ============================================================
+    def _on_db_mode_changed(self, *_):
+        is_edit = self.db_mode_row.get_selected() == 1
+        self.db_search_group.set_visible(is_edit)
+        self.db_create_group.set_visible(not is_edit)
+        self.db_save_btn.set_label("Save Changes" if is_edit else "Add Entry")
+        if is_edit:
+            self._render_db_results(self._db_edit_entries_cache[:20])
+        else:
+            self._db_edit_selected_entry = None
+            self.db_edit_info_group.set_visible(False)
+            self._db_clear_create_fields()
+
+    def _on_db_kind_changed(self, *_):
+        idx = self.db_create_kind_row.get_selected()
+        self._db_kind = "anime" if idx == 0 else "games"
+        self._db_apply_kind_to_fields(self._db_kind)
+
+    def _on_db_edit_kind_changed(self, *_):
+        idx = self.db_edit_kind_row.get_selected()
+        self._db_kind = "anime" if idx == 0 else "games"
+        self._db_edit_selected_entry = None
+        self.db_edit_info_group.set_visible(False)
+        self._reload_db_edit_entries()
+
+    def _db_apply_kind_to_fields(self, kind):
+        if kind == "anime":
             statuses = ANIME_STATUSES
-            self.c_subtype_combo_row.set_visible(True)
-            self.c_subtype_entry_row.set_visible(False)
-            self.c_progress_row.set_visible(True)
+            self.db_subtype_combo_row.set_visible(True)
+            self.db_subtype_entry_row.set_visible(False)
+            self.db_progress_row.set_visible(True)
         else:
             statuses = GAME_STATUSES
-            self.c_subtype_combo_row.set_visible(False)
-            self.c_subtype_entry_row.set_visible(True)
-            self.c_progress_row.set_visible(False)
-        self.c_status_row.set_model(Gtk.StringList.new([s[0] for s in statuses]))
-        self.c_status_row.set_selected(0)
+            self.db_subtype_combo_row.set_visible(False)
+            self.db_subtype_entry_row.set_visible(True)
+            self.db_progress_row.set_visible(False)
+        self.db_status_row.set_model(Gtk.StringList.new([s[0] for s in statuses]))
+        self.db_status_row.set_selected(0)
 
-    def _on_create_unrated_toggled(self, *_):
-        self.c_score_row.set_sensitive(not self.c_unrated_row.get_active())
+    def _on_db_unrated_toggled(self, *_):
+        self.db_score_row.set_sensitive(not self.db_unrated_row.get_active())
 
-    def _on_create_review_toggled(self, *_):
-        active = self.c_review_switch_row.get_active()
-        self.c_review_view.set_sensitive(active)
+    def _on_db_review_toggled(self, *_):
+        active = self.db_review_switch_row.get_active()
+        self.db_review_view.set_sensitive(active)
         if active:
-            self.c_review_view.grab_focus()
+            self.db_review_view.grab_focus()
 
-    def _on_create_choose_image(self, *_):
+    def _on_db_create_choose_image(self, *_):
         dialog = Gtk.FileDialog()
         dialog.set_title("Select image")
         f = Gtk.FileFilter()
@@ -485,145 +418,49 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
         filters.append(f)
         dialog.set_filters(filters)
         dialog.set_default_filter(f)
-        dialog.open(self, None, self._on_create_image_selected)
+        dialog.open(self, None, self._on_db_create_image_selected)
 
-    def _on_create_image_selected(self, dialog, result):
+    def _on_db_create_image_selected(self, dialog, result):
         try:
             file = dialog.open_finish(result)
         except GLib.Error:
             return
         if file:
             path = file.get_path()
-            self._create_image_source = path
-            self._create_image_filename = Path(path).name
-            self.c_image_row.set_subtitle(self._create_image_filename)
+            self._db_create_image_source = path
+            self._db_create_image_filename = Path(path).name
+            self.db_create_image_row.set_subtitle(self._db_create_image_filename)
 
-    def _on_create_clear(self, *_):
-        self.c_title_row.set_text("")
-        self.c_subtype_entry_row.set_text("")
-        self.c_subtype_combo_row.set_selected(0)
-        self.c_score_row.set_value(8)
-        self.c_unrated_row.set_active(False)
-        self.c_progress_row.set_text("")
-        self._create_image_filename = None
-        self._create_image_source = None
-        self.c_image_row.set_subtitle("No image selected")
-        self.c_note_row.set_text("")
-        self.c_review_switch_row.set_active(False)
-        self.c_review_buffer.set_text("")
-
-    def _on_add_clicked(self, *_):
-        try:
-            self._add_entry()
-        except Exception as e:
-            self._toast(f"✗ {e}", error=True)
-
-    def _add_entry(self):
+    def _reload_db_edit_entries(self):
         if not self.project_path:
-            raise ValueError("Select a project folder first")
-
-        title = self.c_title_row.get_text().strip()
-        if not title:
-            raise ValueError("Title is required")
-
-        if self._create_kind == "anime":
-            subtype = ANIME_SUBTYPES[self.c_subtype_combo_row.get_selected()]
-        else:
-            subtype = self.c_subtype_entry_row.get_text().strip()
-            if not subtype:
-                raise ValueError("Subtype is required")
-
-        statuses = ANIME_STATUSES if self._create_kind == "anime" else GAME_STATUSES
-        status_label, status_key = statuses[self.c_status_row.get_selected()]
-
-        score = None
-        if not self.c_unrated_row.get_active():
-            score = int(self.c_score_row.get_value())
-
-        if not self._create_image_filename:
-            raise ValueError("Select an image")
-
-        fields = {
-            "title": title,
-            "subtype": subtype,
-            "status_label": status_label,
-            "status_key": status_key,
-            "score": score,
-            "image_filename": self._create_image_filename,
-            "image_source": self._create_image_source,
-            "note": self.c_note_row.get_text().strip(),
-        }
-        if self._create_kind == "anime":
-            fields["progress"] = self.c_progress_row.get_text().strip()
-
-        review_text = None
-        if self.c_review_switch_row.get_active():
-            start = self.c_review_buffer.get_start_iter()
-            end = self.c_review_buffer.get_end_iter()
-            review_text = self.c_review_buffer.get_text(start, end, False).strip()
-            if not review_text:
-                raise ValueError("Review is enabled but text is empty")
-
-        result = archive_logic.add_entry(
-            self.project_path, self._create_kind, fields, review_text
-        )
-
-        msg = f"✓ Added '{title}'"
-        if review_text:
-            msg += f"  +  /reviews/{self._create_kind}/{result['slug']}"
-        self._toast(msg)
-        self._on_create_clear()
-
-        # The edit-tab cache is now stale
-        self._edit_entries_cache = []
-        self._on_edit_search_changed()
-
-    # ============================================================
-    # EDIT handlers
-    # ============================================================
-    def _on_edit_kind_changed(self, *_):
-        idx = self.e_kind_row.get_selected()
-        self._edit_kind = "anime" if idx == 0 else "games"
-        # Clear current selection — the entry isn't valid for the new kind
-        self._clear_edit_form()
-        self._reload_edit_entries()
-
-    def _reload_edit_entries(self):
-        """Refresh the entries cache for the current kind, then re-render results."""
-        if not self.project_path:
-            self._edit_entries_cache = []
-            self._render_edit_results([])
+            self._db_edit_entries_cache = []
+            self._render_db_results([])
             return
         try:
-            self._edit_entries_cache = archive_logic.list_entries(
-                self.project_path, self._edit_kind
+            self._db_edit_entries_cache = archive_logic.list_entries(
+                self.project_path, self._db_kind
             )
         except Exception as e:
-            self._edit_entries_cache = []
+            self._db_edit_entries_cache = []
             self._toast(f"✗ {e}", error=True)
-        self._on_edit_search_changed()
+        self._on_db_search_changed()
 
-    def _on_edit_search_changed(self, *_):
-        query = self.e_search_entry.get_text().strip().lower()
-        if not self._edit_entries_cache:
-            self._render_edit_results([])
+    def _on_db_search_changed(self, *_):
+        query = self.db_search_entry.get_text().strip().lower()
+        if not self._db_edit_entries_cache:
+            self._render_db_results([])
             return
-        if not query:
-            # Show first 20 entries when no query, to give some context
-            results = self._edit_entries_cache[:20]
-        else:
-            results = [
-                e for e in self._edit_entries_cache
-                if query in e.get("title", "").lower()
-            ]
-        self._render_edit_results(results)
+        results = self._db_edit_entries_cache[:20] if not query else [
+            e for e in self._db_edit_entries_cache
+            if query in e.get("title", "").lower()
+        ]
+        self._render_db_results(results)
 
-    def _render_edit_results(self, results):
-        # Clear existing rows
-        child = self.e_results_listbox.get_first_child()
+    def _render_db_results(self, results):
+        child = self.db_results_listbox.get_first_child()
         while child:
             nxt = child.get_next_sibling()
-            self.e_results_listbox.remove(child)
+            self.db_results_listbox.remove(child)
             child = nxt
 
         if not results:
@@ -631,7 +468,7 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
             placeholder.add_css_class("dim-label")
             placeholder.set_margin_top(20)
             placeholder.set_margin_bottom(20)
-            self.e_results_listbox.append(placeholder)
+            self.db_results_listbox.append(placeholder)
             return
 
         for entry in results:
@@ -642,173 +479,475 @@ class ArchiveEditorWindow(Adw.ApplicationWindow):
                 sub_parts.append(entry["status"])
             if entry.get("score") is not None:
                 sub_parts.append(f"{entry['score']}/10")
-            elif "score" not in entry:
-                sub_parts.append("unrated")
             if sub_parts:
                 row.set_subtitle("  ·  ".join(sub_parts))
             row.set_activatable(True)
-            row._entry = entry  # stash data for the activate handler
-            self.e_results_listbox.append(row)
+            row._entry = entry
+            self.db_results_listbox.append(row)
 
-    def _on_edit_result_activated(self, _listbox, row):
+    def _on_db_result_activated(self, _listbox, row):
         entry = getattr(row, "_entry", None)
         if entry is None:
             return
         try:
-            self._load_entry_into_form(entry["title"])
+            self._load_db_entry_into_form(entry["title"])
         except Exception as e:
             self._toast(f"✗ {e}", error=True)
 
-    def _load_entry_into_form(self, title):
+    def _load_db_entry_into_form(self, title):
         data = archive_logic.load_entry_for_edit(
-            self.project_path, self._edit_kind, title
+            self.project_path, self._db_kind, title
         )
-        self._edit_selected_entry = data
-        self._edit_had_review = data["has_review"]
+        self._db_edit_selected_entry = data
+        self._db_edit_had_review = data["has_review"]
 
-        # Locked fields
-        self.e_title_row.set_subtitle(data["title"])
-        self.e_image_row.set_subtitle(data.get("image", "—"))
+        self.db_edit_title_row.set_subtitle(data["title"])
+        self.db_edit_image_row.set_subtitle(data.get("image", "—"))
+        self.db_edit_info_group.set_visible(True)
 
-        # Subtype
         existing_subtype = data.get("type", "")
-        if self._edit_kind == "anime":
-            self.e_subtype_combo_row.set_visible(True)
-            self.e_subtype_entry_row.set_visible(False)
-            if existing_subtype in ANIME_SUBTYPES:
-                self.e_subtype_combo_row.set_selected(
-                    ANIME_SUBTYPES.index(existing_subtype)
-                )
-            else:
-                self.e_subtype_combo_row.set_selected(0)
+        if self._db_kind == "anime":
+            self.db_subtype_combo_row.set_visible(True)
+            self.db_subtype_entry_row.set_visible(False)
+            self.db_subtype_combo_row.set_selected(
+                ANIME_SUBTYPES.index(existing_subtype) if existing_subtype in ANIME_SUBTYPES else 0
+            )
         else:
-            self.e_subtype_combo_row.set_visible(False)
-            self.e_subtype_entry_row.set_visible(True)
-            self.e_subtype_entry_row.set_text(existing_subtype)
+            self.db_subtype_combo_row.set_visible(False)
+            self.db_subtype_entry_row.set_visible(True)
+            self.db_subtype_entry_row.set_text(existing_subtype)
 
-        # Status
-        statuses = ANIME_STATUSES if self._edit_kind == "anime" else GAME_STATUSES
+        statuses = ANIME_STATUSES if self._db_kind == "anime" else GAME_STATUSES
         labels = [s[0] for s in statuses]
-        self.e_status_row.set_model(Gtk.StringList.new(labels))
+        self.db_status_row.set_model(Gtk.StringList.new(labels))
         existing_status = data.get("status", labels[0])
-        if existing_status in labels:
-            self.e_status_row.set_selected(labels.index(existing_status))
+        self.db_status_row.set_selected(
+            labels.index(existing_status) if existing_status in labels else 0
+        )
+
+        if data.get("score") is not None:
+            self.db_unrated_row.set_active(False)
+            self.db_score_row.set_value(float(data["score"]))
+            self.db_score_row.set_sensitive(True)
         else:
-            self.e_status_row.set_selected(0)
+            self.db_unrated_row.set_active(True)
+            self.db_score_row.set_sensitive(False)
 
-        # Score
-        if "score" in data and data.get("score") is not None:
-            self.e_unrated_row.set_active(False)
-            self.e_score_row.set_value(float(data["score"]))
-            self.e_score_row.set_sensitive(True)
-        else:
-            self.e_unrated_row.set_active(True)
-            self.e_score_row.set_sensitive(False)
+        self.db_progress_row.set_visible(self._db_kind == "anime")
+        if self._db_kind == "anime":
+            self.db_progress_row.set_text(data.get("progress", ""))
 
-        # Progress
-        if self._edit_kind == "anime":
-            self.e_progress_row.set_visible(True)
-            self.e_progress_row.set_text(data.get("progress", ""))
-        else:
-            self.e_progress_row.set_visible(False)
+        self.db_note_row.set_text(data.get("note", ""))
 
-        # Note
-        self.e_note_row.set_text(data.get("note", ""))
-
-        # Review
         has = data["has_review"]
-        self.e_review_switch_row.set_active(has)
-        self.e_review_view.set_sensitive(has)
-        self.e_review_buffer.set_text(data.get("review_text", ""))
+        self.db_review_switch_row.set_active(has)
+        self.db_review_view.set_sensitive(has)
+        self.db_review_buffer.set_text(data.get("review_text", ""))
 
-        self.e_form_box.set_visible(True)
+    def _db_clear_create_fields(self):
+        self.db_create_title_row.set_text("")
+        self._db_create_image_source = None
+        self._db_create_image_filename = None
+        self.db_create_image_row.set_subtitle("No image selected")
 
-    def _clear_edit_form(self):
-        self._edit_selected_entry = None
-        self._edit_had_review = False
-        self.e_form_box.set_visible(False)
-        self.e_title_row.set_subtitle("")
-        self.e_image_row.set_subtitle("")
-        self.e_subtype_entry_row.set_text("")
-        self.e_subtype_combo_row.set_selected(0)
-        self.e_score_row.set_value(8)
-        self.e_unrated_row.set_active(False)
-        self.e_progress_row.set_text("")
-        self.e_note_row.set_text("")
-        self.e_review_switch_row.set_active(False)
-        self.e_review_buffer.set_text("")
-        self.e_search_entry.set_text("")
+    def _on_db_clear(self, *_):
+        self._db_edit_selected_entry = None
+        self._db_edit_had_review = False
+        self.db_edit_info_group.set_visible(False)
+        self._db_clear_create_fields()
+        self.db_subtype_combo_row.set_selected(0)
+        self.db_subtype_entry_row.set_text("")
+        self.db_score_row.set_value(8)
+        self.db_unrated_row.set_active(False)
+        self.db_progress_row.set_text("")
+        self.db_note_row.set_text("")
+        self.db_review_switch_row.set_active(False)
+        self.db_review_buffer.set_text("")
+        self.db_search_entry.set_text("")
 
-    def _on_edit_unrated_toggled(self, *_):
-        self.e_score_row.set_sensitive(not self.e_unrated_row.get_active())
-
-    def _on_edit_review_toggled(self, *_):
-        active = self.e_review_switch_row.get_active()
-        self.e_review_view.set_sensitive(active)
-        if active:
-            self.e_review_view.grab_focus()
-
-    def _on_save_clicked(self, *_):
+    def _on_db_save_clicked(self, *_):
         try:
-            self._save_edit()
+            if self.db_mode_row.get_selected() == 1:
+                self._save_db_edit()
+            else:
+                self._save_db_create()
         except Exception as e:
             self._toast(f"✗ {e}", error=True)
 
-    def _save_edit(self):
+    def _save_db_create(self):
         if not self.project_path:
             raise ValueError("Select a project folder first")
-        if not self._edit_selected_entry:
-            raise ValueError("No entry selected")
 
-        title = self._edit_selected_entry["title"]
+        title = self.db_create_title_row.get_text().strip()
+        if not title:
+            raise ValueError("Title is required")
 
-        if self._edit_kind == "anime":
-            subtype = ANIME_SUBTYPES[self.e_subtype_combo_row.get_selected()]
+        if self._db_kind == "anime":
+            subtype = ANIME_SUBTYPES[self.db_subtype_combo_row.get_selected()]
         else:
-            subtype = self.e_subtype_entry_row.get_text().strip()
+            subtype = self.db_subtype_entry_row.get_text().strip()
             if not subtype:
                 raise ValueError("Subtype is required")
 
-        statuses = ANIME_STATUSES if self._edit_kind == "anime" else GAME_STATUSES
-        status_label, status_key = statuses[self.e_status_row.get_selected()]
+        statuses = ANIME_STATUSES if self._db_kind == "anime" else GAME_STATUSES
+        status_label, status_key = statuses[self.db_status_row.get_selected()]
 
         score = None
-        if not self.e_unrated_row.get_active():
-            score = int(self.e_score_row.get_value())
+        if not self.db_unrated_row.get_active():
+            score = int(self.db_score_row.get_value())
+
+        if not self._db_create_image_filename:
+            raise ValueError("Select an image")
+
+        fields = {
+            "title": title,
+            "subtype": subtype,
+            "status_label": status_label,
+            "status_key": status_key,
+            "score": score,
+            "image_filename": self._db_create_image_filename,
+            "image_source": self._db_create_image_source,
+            "note": self.db_note_row.get_text().strip(),
+        }
+        if self._db_kind == "anime":
+            fields["progress"] = self.db_progress_row.get_text().strip()
+
+        review_text = None
+        if self.db_review_switch_row.get_active():
+            start = self.db_review_buffer.get_start_iter()
+            end = self.db_review_buffer.get_end_iter()
+            review_text = self.db_review_buffer.get_text(start, end, False).strip()
+            if not review_text:
+                raise ValueError("Review is enabled but text is empty")
+
+        result = archive_logic.add_entry(
+            self.project_path, self._db_kind, fields, review_text
+        )
+
+        msg = f"✓ Added '{title}'"
+        if review_text:
+            msg += f"  +  /reviews/{self._db_kind}/{result['slug']}"
+        self._toast(msg)
+        self._on_db_clear()
+        self._db_edit_entries_cache = []
+        self._on_db_search_changed()
+
+    def _save_db_edit(self):
+        if not self.project_path:
+            raise ValueError("Select a project folder first")
+        if not self._db_edit_selected_entry:
+            raise ValueError("No entry selected — search and click an entry first")
+
+        title = self._db_edit_selected_entry["title"]
+
+        if self._db_kind == "anime":
+            subtype = ANIME_SUBTYPES[self.db_subtype_combo_row.get_selected()]
+        else:
+            subtype = self.db_subtype_entry_row.get_text().strip()
+            if not subtype:
+                raise ValueError("Subtype is required")
+
+        statuses = ANIME_STATUSES if self._db_kind == "anime" else GAME_STATUSES
+        status_label, status_key = statuses[self.db_status_row.get_selected()]
+
+        score = None
+        if not self.db_unrated_row.get_active():
+            score = int(self.db_score_row.get_value())
 
         updates = {
             "subtype": subtype,
             "status_label": status_label,
             "status_key": status_key,
             "score": score,
-            "note": self.e_note_row.get_text().strip(),
+            "note": self.db_note_row.get_text().strip(),
         }
-        if self._edit_kind == "anime":
-            updates["progress"] = self.e_progress_row.get_text().strip()
+        if self._db_kind == "anime":
+            updates["progress"] = self.db_progress_row.get_text().strip()
 
         review_text = None
-        if self.e_review_switch_row.get_active():
-            start = self.e_review_buffer.get_start_iter()
-            end = self.e_review_buffer.get_end_iter()
-            review_text = self.e_review_buffer.get_text(start, end, False).strip()
+        if self.db_review_switch_row.get_active():
+            start = self.db_review_buffer.get_start_iter()
+            end = self.db_review_buffer.get_end_iter()
+            review_text = self.db_review_buffer.get_text(start, end, False).strip()
             if not review_text:
                 raise ValueError("Review is enabled but text is empty")
 
         result = archive_logic.edit_entry(
-            self.project_path, self._edit_kind, title, updates, review_text
+            self.project_path, self._db_kind, title, updates, review_text
         )
 
         msg = f"✓ Updated '{title}'"
         if result["has_review_now"] and not result["had_review"]:
-            msg += f"  +  /reviews/{self._edit_kind}/{result['slug']}"
+            msg += f"  +  /reviews/{self._db_kind}/{result['slug']}"
         elif not result["has_review_now"] and result["had_review"]:
             msg += "  ·  review removed"
         self._toast(msg)
 
-        # Refresh the cache and reload the form with the updated values
-        self._edit_entries_cache = []
-        self._reload_edit_entries()
+        self._db_edit_entries_cache = []
+        self._reload_db_edit_entries()
         try:
-            self._load_entry_into_form(title)
+            self._load_db_entry_into_form(title)
         except Exception:
-            self._clear_edit_form()
+            self._on_db_clear()
+
+    # ============================================================
+    # BLOG view
+    # ============================================================
+    def _build_blog_view(self):
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(640)
+        clamp.set_tightening_threshold(580)
+        scrolled.set_child(clamp)
+
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        main.set_margin_top(24)
+        main.set_margin_bottom(24)
+        main.set_margin_start(12)
+        main.set_margin_end(12)
+        clamp.set_child(main)
+
+        # Project
+        proj_group = Adw.PreferencesGroup()
+        proj_group.set_title("Project")
+        proj_group.set_description("The website project folder")
+        main.append(proj_group)
+        self.project_row_blog = self._make_project_row()
+        proj_group.add(self.project_row_blog)
+
+        # Mode selector
+        mode_group = Adw.PreferencesGroup(title="Mode")
+        main.append(mode_group)
+
+        self.b_mode_row = Adw.ComboRow(title="Action")
+        self.b_mode_row.set_model(Gtk.StringList.new(["Create new post", "Edit existing post"]))
+        self.b_mode_row.connect("notify::selected", self._on_blog_mode_changed)
+        mode_group.add(self.b_mode_row)
+
+        # Edit-mode search (hidden in Create mode)
+        self.b_search_group = Adw.PreferencesGroup(title="Find post")
+        main.append(self.b_search_group)
+
+        self.b_search_entry = Gtk.SearchEntry()
+        self.b_search_entry.set_placeholder_text("Search by title…")
+        self.b_search_entry.connect("search-changed", self._on_blog_search_changed)
+
+        search_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        search_wrap.set_margin_top(8)
+        search_wrap.append(self.b_search_entry)
+
+        self.b_results_listbox = Gtk.ListBox()
+        self.b_results_listbox.add_css_class("boxed-list")
+        self.b_results_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.b_results_listbox.connect("row-activated", self._on_blog_result_activated)
+
+        results_scroll = Gtk.ScrolledWindow()
+        results_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        results_scroll.set_min_content_height(120)
+        results_scroll.set_max_content_height(220)
+        results_scroll.set_propagate_natural_height(True)
+        results_scroll.set_child(self.b_results_listbox)
+        search_wrap.append(results_scroll)
+        self.b_search_group.add(search_wrap)
+        self.b_search_group.set_visible(False)
+
+        # Shared fields
+        fields_group = Adw.PreferencesGroup(title="Post")
+        main.append(fields_group)
+
+        self.b_title_row = Adw.EntryRow(title="Title")
+        fields_group.add(self.b_title_row)
+
+        self.b_category_row = Adw.ComboRow(title="Category")
+        self.b_category_row.set_model(Gtk.StringList.new(BLOG_CATEGORIES))
+        fields_group.add(self.b_category_row)
+
+        self.b_date_row = Adw.EntryRow(title="Date  (e.g. May 2026)")
+        fields_group.add(self.b_date_row)
+
+        self.b_excerpt_row = Adw.EntryRow(title="Excerpt  (shown in post list)")
+        fields_group.add(self.b_excerpt_row)
+
+        self.b_featured_row = Adw.SwitchRow(
+            title="Featured",
+            subtitle="Show on homepage in the Recent Posts section",
+        )
+        fields_group.add(self.b_featured_row)
+
+        # Body text area
+        body_group = Adw.PreferencesGroup(title="Content")
+        body_group.set_description("Each blank line starts a new paragraph")
+        main.append(body_group)
+
+        self.b_body_buffer, self.b_body_view = self._make_text_area(body_group, 300)
+
+        # Action buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(8)
+        main.append(btn_row)
+
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.connect("clicked", self._on_blog_clear)
+        btn_row.append(clear_btn)
+
+        self.b_save_btn = Gtk.Button(label="Add Post")
+        self.b_save_btn.add_css_class("suggested-action")
+        self.b_save_btn.connect("clicked", self._on_blog_save_clicked)
+        btn_row.append(self.b_save_btn)
+
+        return scrolled
+
+    # ============================================================
+    # BLOG handlers
+    # ============================================================
+    def _on_blog_mode_changed(self, *_):
+        is_edit = self.b_mode_row.get_selected() == 1
+        self.b_search_group.set_visible(is_edit)
+        self.b_save_btn.set_label("Save Changes" if is_edit else "Add Post")
+        if is_edit:
+            self._render_blog_results(self._blog_posts_cache)
+        else:
+            self._blog_selected_slug = None
+            self._on_blog_clear()
+
+    def _reload_blog_posts(self):
+        if not self.project_path:
+            self._blog_posts_cache = []
+            self._render_blog_results([])
+            return
+        try:
+            self._blog_posts_cache = archive_logic.list_posts(self.project_path)
+        except Exception as e:
+            self._blog_posts_cache = []
+            self._toast(f"✗ {e}", error=True)
+        self._on_blog_search_changed()
+
+    def _on_blog_search_changed(self, *_):
+        query = self.b_search_entry.get_text().strip().lower()
+        if not self._blog_posts_cache:
+            self._render_blog_results([])
+            return
+        results = self._blog_posts_cache if not query else [
+            p for p in self._blog_posts_cache
+            if query in p.get("title", "").lower()
+        ]
+        self._render_blog_results(results)
+
+    def _render_blog_results(self, results):
+        child = self.b_results_listbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.b_results_listbox.remove(child)
+            child = nxt
+
+        if not results:
+            placeholder = Gtk.Label(label="No posts found")
+            placeholder.add_css_class("dim-label")
+            placeholder.set_margin_top(16)
+            placeholder.set_margin_bottom(16)
+            self.b_results_listbox.append(placeholder)
+            return
+
+        for post in results:
+            row = Adw.ActionRow()
+            row.set_title(post.get("title", "(no title)"))
+            sub_parts = []
+            if post.get("category"):
+                sub_parts.append(post["category"])
+            if post.get("date"):
+                sub_parts.append(post["date"])
+            if post.get("featured"):
+                sub_parts.append("featured")
+            if sub_parts:
+                row.set_subtitle("  ·  ".join(sub_parts))
+            row.set_activatable(True)
+            row._post = post
+            self.b_results_listbox.append(row)
+
+    def _on_blog_result_activated(self, _listbox, row):
+        post = getattr(row, "_post", None)
+        if post is None:
+            return
+        try:
+            self._load_post_into_form(post["slug"])
+        except Exception as e:
+            self._toast(f"✗ {e}", error=True)
+
+    def _load_post_into_form(self, slug):
+        data = archive_logic.load_post_for_edit(self.project_path, slug)
+        self._blog_selected_slug = slug
+
+        self.b_title_row.set_text(data.get("title", ""))
+        category = data.get("category", "Notes")
+        self.b_category_row.set_selected(
+            BLOG_CATEGORIES.index(category) if category in BLOG_CATEGORIES else 0
+        )
+        self.b_date_row.set_text(data.get("date", ""))
+        self.b_excerpt_row.set_text(data.get("excerpt", ""))
+        self.b_featured_row.set_active(bool(data.get("featured")))
+        self.b_body_buffer.set_text(data.get("body_text", ""))
+
+    def _on_blog_clear(self, *_):
+        self._blog_selected_slug = None
+        self.b_title_row.set_text("")
+        self.b_category_row.set_selected(0)
+        self.b_date_row.set_text("")
+        self.b_excerpt_row.set_text("")
+        self.b_featured_row.set_active(False)
+        self.b_body_buffer.set_text("")
+        self.b_search_entry.set_text("")
+
+    def _on_blog_save_clicked(self, *_):
+        try:
+            self._save_blog_post()
+        except Exception as e:
+            self._toast(f"✗ {e}", error=True)
+
+    def _save_blog_post(self):
+        if not self.project_path:
+            raise ValueError("Select a project folder first")
+
+        title = self.b_title_row.get_text().strip()
+        if not title:
+            raise ValueError("Title is required")
+
+        category = BLOG_CATEGORIES[self.b_category_row.get_selected()]
+        date = self.b_date_row.get_text().strip()
+        if not date:
+            raise ValueError("Date is required")
+
+        excerpt = self.b_excerpt_row.get_text().strip()
+        featured = self.b_featured_row.get_active()
+
+        start = self.b_body_buffer.get_start_iter()
+        end = self.b_body_buffer.get_end_iter()
+        body_text = self.b_body_buffer.get_text(start, end, False).strip()
+        if not body_text:
+            raise ValueError("Post content is required")
+
+        fields = {
+            "title": title,
+            "excerpt": excerpt,
+            "date": date,
+            "category": category,
+            "featured": featured,
+            "body_text": body_text,
+        }
+
+        is_edit = self.b_mode_row.get_selected() == 1
+
+        if is_edit:
+            if not self._blog_selected_slug:
+                raise ValueError("No post selected — search and click a post first")
+            archive_logic.edit_post(self.project_path, self._blog_selected_slug, fields)
+            self._toast(f"✓ Updated '{title}'")
+        else:
+            result = archive_logic.add_post(self.project_path, fields)
+            self._toast(f"✓ Added post '{title}'  →  /blog/{result['slug']}")
+            self._on_blog_clear()
+
+        self._reload_blog_posts()

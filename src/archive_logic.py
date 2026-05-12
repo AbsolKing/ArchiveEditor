@@ -463,6 +463,7 @@ def validate_project(project_dir: Path):
         project_dir / "src" / "App.jsx",
         project_dir / "src" / "data" / "anime.js",
         project_dir / "src" / "data" / "games.js",
+        project_dir / "src" / "data" / "posts.js",
         project_dir / "public" / "covers",
     ]
     for p in must_exist:
@@ -637,3 +638,231 @@ def edit_entry(project_dir, kind: str, title: str, updates: dict, review_text) -
         "has_review_now": will_have_review,
         "review_file": str(review_file) if will_have_review else None,
     }
+
+
+# ============================================================
+# Blog post helpers
+# ============================================================
+
+BLOG_CATEGORIES = ["Notes", "Archive", "Design", "Roadmap"]
+
+
+def _parse_posts_js(content: str) -> list:
+    """Parse the blogPosts array from posts.js.
+
+    Returns a list of dicts with: slug, title, date, category, featured,
+    plus internal markers _line_start, _block_end, _full_end.
+    """
+    return parse_data_entries(content, "blogPosts")
+
+
+def list_posts(project_dir) -> list:
+    """Return all posts from posts.js as plain dicts (no internal markers)."""
+    project_dir = Path(project_dir).expanduser().resolve()
+    validate_project(project_dir)
+    posts_file = project_dir / "src" / "data" / "posts.js"
+    content = posts_file.read_text(encoding="utf-8")
+    entries = _parse_posts_js(content)
+    return [{k: v for k, v in e.items() if not k.startswith("_")} for e in entries]
+
+
+def load_post_for_edit(project_dir, slug: str) -> dict:
+    """Load one post's metadata plus its JSX body text."""
+    project_dir = Path(project_dir).expanduser().resolve()
+    validate_project(project_dir)
+
+    posts_file = project_dir / "src" / "data" / "posts.js"
+    content = posts_file.read_text(encoding="utf-8")
+    entries = _parse_posts_js(content)
+    target = next((e for e in entries if e.get("slug") == slug), None)
+    if target is None:
+        raise ValueError(f"Post '{slug}' not found in posts.js")
+
+    post_file = project_dir / "src" / "pages" / "blog" / f"{slug}.jsx"
+    body_text = ""
+    if post_file.exists():
+        body_text = _read_blog_post_paragraphs(post_file)
+
+    result = {k: v for k, v in target.items() if not k.startswith("_")}
+    result["body_text"] = body_text
+    return result
+
+
+def _read_blog_post_paragraphs(post_file: Path) -> str:
+    """Extract paragraph text from a blog post JSX file.
+
+    Handles both template-literal <p>{`text`}</p> and plain <p>text</p>.
+    """
+    content = post_file.read_text(encoding="utf-8")
+
+    tl_pat = re.compile(r"<p>\{`(.*?)`\}</p>", re.DOTALL)
+    matches = tl_pat.findall(content)
+    if matches:
+        paragraphs = [_unescape_jsx_template(m).strip() for m in matches]
+        return "\n\n".join(p for p in paragraphs if p)
+
+    plain_pat = re.compile(r"<p>(.*?)</p>", re.DOTALL)
+    paragraphs = []
+    for m in plain_pat.findall(content):
+        text = re.sub(r"\s+", " ", m).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def build_blog_post_jsx(slug: str, fields: dict) -> str:
+    """Generate the JSX file for a blog post page."""
+    component_name = pascal_case(slug)
+
+    raw = fields.get("body_text", "").strip()
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    if not paragraphs:
+        paragraphs = ["Post content coming soon."]
+    body = "\n      ".join(f"<p>{{`{jsx_template(p)}`}}</p>" for p in paragraphs)
+
+    title_escaped = jsx_template(fields["title"])
+    date_escaped = jsx_template(fields.get("date", ""))
+    category = fields.get("category", "Notes")
+
+    return (
+        "import BlogPostLayout from '../../components/blog/BlogPostLayout'\n"
+        "\n"
+        f"export default function {component_name}() {{\n"
+        "  return (\n"
+        "    <BlogPostLayout\n"
+        f"      title={{`{title_escaped}`}}\n"
+        f'      date="{date_escaped}"\n'
+        f'      category="{category}"\n'
+        "    >\n"
+        f"      {body}\n"
+        "    </BlogPostLayout>\n"
+        "  )\n"
+        "}\n"
+    )
+
+
+def build_posts_js_entry(fields: dict) -> str:
+    """Build a single entry block for posts.js blogPosts array."""
+    featured_val = "true" if fields.get("featured") else "false"
+    parts = [
+        f"    slug: {js_string(fields['slug'])},",
+        f"    title: {js_string(fields['title'])},",
+        f"    excerpt: {js_string(fields.get('excerpt', ''))},",
+        f"    date: {js_string(fields.get('date', ''))},",
+        f"    category: {js_string(fields.get('category', 'Notes'))},",
+        f"    featured: {featured_val},",
+    ]
+    return "  {\n" + "\n".join(parts) + "\n  },"
+
+
+def slug_exists_in_posts(content: str, slug: str) -> bool:
+    pat = re.compile(r"slug:\s*['\"]" + re.escape(slug) + r"['\"]")
+    return bool(pat.search(content))
+
+
+def update_app_jsx_for_post(project_dir: Path, slug: str):
+    """Add import + route for a blog post to App.jsx."""
+    app_path = project_dir / "src" / "App.jsx"
+    content = app_path.read_text(encoding="utf-8")
+
+    component_name = pascal_case(slug)
+    import_line = f"import {component_name} from './pages/blog/{slug}'"
+    route_line = f'        <Route path="/blog/{slug}" element={{<{component_name} />}} />'
+
+    if import_line in content:
+        raise ValueError(f"Blog post '{slug}' is already registered in App.jsx")
+
+    content = insert_after_import_section(content, "// ── Blog posts ──", import_line)
+    content = insert_after_route_section(content, "{/* Blog posts */}", route_line)
+    app_path.write_text(content, encoding="utf-8")
+
+
+def remove_post_from_app_jsx(project_dir: Path, slug: str):
+    """Strip the import and route lines for a blog post from App.jsx."""
+    app_path = project_dir / "src" / "App.jsx"
+    content = app_path.read_text(encoding="utf-8")
+    component_name = pascal_case(slug)
+
+    import_pat = f"import {component_name} from './pages/blog/{slug}'"
+    route_pat = f'path="/blog/{slug}"'
+
+    new_lines = []
+    for line in content.splitlines(keepends=True):
+        if import_pat in line:
+            continue
+        if route_pat in line and "<Route" in line:
+            continue
+        new_lines.append(line)
+    app_path.write_text("".join(new_lines), encoding="utf-8")
+
+
+def replace_post_entry_in_posts_js(content: str, target: dict, new_entry_text: str) -> str:
+    """Replace one post's entry block in posts.js in-place."""
+    return content[:target["_line_start"]] + new_entry_text + content[target["_full_end"]:]
+
+
+def add_post(project_dir, fields: dict) -> dict:
+    """Create a new blog post: posts.js entry + JSX page + App.jsx wiring.
+
+    fields keys: title, excerpt, date, category, featured, body_text
+    """
+    project_dir = Path(project_dir).expanduser().resolve()
+    validate_project(project_dir)
+
+    slug = slugify(fields["title"])
+    if not slug:
+        raise ValueError("Title produces an empty slug")
+
+    fields["slug"] = slug
+
+    posts_file = project_dir / "src" / "data" / "posts.js"
+    posts_content = posts_file.read_text(encoding="utf-8")
+    if slug_exists_in_posts(posts_content, slug):
+        raise ValueError(f"A post with slug '{slug}' already exists in posts.js")
+
+    post_file = project_dir / "src" / "pages" / "blog" / f"{slug}.jsx"
+    if post_file.exists():
+        raise ValueError(f"Post file already exists: {post_file}")
+
+    entry_text = build_posts_js_entry(fields)
+    new_posts_content = insert_in_array(posts_content, "blogPosts", entry_text)
+    post_jsx = build_blog_post_jsx(slug, fields)
+
+    # Commit
+    posts_file.write_text(new_posts_content, encoding="utf-8")
+    post_file.parent.mkdir(parents=True, exist_ok=True)
+    post_file.write_text(post_jsx, encoding="utf-8")
+    update_app_jsx_for_post(project_dir, slug)
+
+    return {"slug": slug, "post_file": str(post_file)}
+
+
+def edit_post(project_dir, slug: str, fields: dict) -> dict:
+    """Update an existing post's metadata and body.
+
+    fields keys: title, excerpt, date, category, featured, body_text
+    Slug is NOT changed (it would break URLs).
+    """
+    project_dir = Path(project_dir).expanduser().resolve()
+    validate_project(project_dir)
+
+    posts_file = project_dir / "src" / "data" / "posts.js"
+    content = posts_file.read_text(encoding="utf-8")
+    entries = _parse_posts_js(content)
+    target = next((e for e in entries if e.get("slug") == slug), None)
+    if target is None:
+        raise ValueError(f"Post '{slug}' not found in posts.js")
+
+    fields["slug"] = slug
+    new_entry_text = build_posts_js_entry(fields)
+    new_content = replace_post_entry_in_posts_js(content, target, new_entry_text)
+
+    post_file = project_dir / "src" / "pages" / "blog" / f"{slug}.jsx"
+    post_jsx = build_blog_post_jsx(slug, fields)
+
+    # Commit
+    posts_file.write_text(new_content, encoding="utf-8")
+    post_file.parent.mkdir(parents=True, exist_ok=True)
+    post_file.write_text(post_jsx, encoding="utf-8")
+
+    return {"slug": slug, "post_file": str(post_file)}

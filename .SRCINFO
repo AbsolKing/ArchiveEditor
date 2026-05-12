@@ -1,6 +1,6 @@
 pkgbase = archive-editor-git
 	pkgdesc = GTK4/libadwaita desktop app for managing ABSOLKING Archive entries and reviews
-	pkgver = 0.2.0
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/AbsolKing/ArchiveEditor
 	arch = x86_64

@@ -1,5 +1,5 @@
 pkgname=archive-editor-git
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="GTK4/libadwaita desktop app for managing ABSOLKING Archive entries and reviews"
 arch=('x86_64')
